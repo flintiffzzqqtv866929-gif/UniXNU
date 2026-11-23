@@ -278,15 +278,21 @@ jobs:
             echo "a Data seed is already prepared"
             exit 0
           fi
-          build=$(./unixnu ipsw info | head -n 1 | sed -n 's/.*(\([^)]*\)).*/\1/p')
+          # Read each tool's output whole, then parse. Piping into head closes the pipe under pipefail and
+          # the writer dies with a broken pipe (exit 120 before any work happened).
+          info=$(./unixnu ipsw info)
+          build=$(printf '%s\n' "$info" | sed -n '1s/.*(\([^)]*\)).*/\1/p')
           [ -n "$build" ] || { echo "::error::cannot read the build from ipsw info"; exit 1; }
           # iPadOS 27 ships the OS image as an AEA archive: macOS /usr/bin/aea decrypts it with the key
           # the ipsw tool reads from the archive header.
-          aea=$(./unixnu ipsw fetch OS | tail -n 1)
+          fetched=$(./unixnu ipsw fetch OS)
+          aea=$(printf '%s\n' "$fetched" | sed -n '$p')
           echo "OS member: ${aea}"
+          [ -f "$aea" ] || { echo "::error::ipsw fetch OS produced no image: ${fetched}"; exit 1; }
           command -v ipsw >/dev/null || brew install blacktop/tap/ipsw
-          key=$(ipsw fw aea --key "$aea" | sed -n 's/^base64: //p' | head -n 1)
-          [ -n "$key" ] || { echo "::error::${aea}: no AEA key"; exit 1; }
+          keys=$(ipsw fw aea --key "$aea" || true)
+          key=$(printf '%s\n' "$keys" | sed -n 's/^base64: //p' | sed -n '1p')
+          [ -n "$key" ] || { echo "::error::${aea}: no AEA key: ${keys}"; exit 1; }
           /usr/bin/aea decrypt -i "$aea" -o "$RUNNER_TEMP/os.dmg" -key-value "$key"
           # packed_ramdisk ships in the DarwinBoot submodule, the same one the payload step reads.
           git submodule update --init --depth 1 drivers/DarwinBoot
