@@ -64,6 +64,22 @@ on:
         description: Size of that first-install Data volume in GiB (3..1024)
         required: false
         default: "3"
+      build_firmware:
+        description: Build the Mu-Silicium firmware volume (needs the uke vendor binaries)
+        type: boolean
+        default: false
+      build_bootimg:
+        description: Pack the boot image from the firmware volume and the built payload
+        type: boolean
+        default: false
+      uefi_ref:
+        description: uefi-uke ref (empty uses the recorded commit)
+        required: false
+        default: ""
+      uefi_binaries_url:
+        description: URL of a tar.gz containing Binaries/uke from the board's vendor firmware (masked in logs)
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -122,13 +138,17 @@ jobs:
           SKIP_SETUP: ${{ inputs.skip_setup }}
           INIT_DATA: ${{ inputs.init_data }}
           DATA_GIB: ${{ inputs.data_gib }}
+          BUILD_FIRMWARE: ${{ inputs.build_firmware }}
+          BUILD_BOOTIMG: ${{ inputs.build_bootimg }}
         run: |
           # The URLs can carry access tokens and the logs of a public repository are public: read them from the
           # event payload, never from step environments, and mask them before any later step prints its env.
           trust_cache_url=$(jq -r '.inputs.trust_cache_url // ""' "$GITHUB_EVENT_PATH")
           data_seed_url=$(jq -r '.inputs.data_seed_url // ""' "$GITHUB_EVENT_PATH")
+          uefi_binaries_url=$(jq -r '.inputs.uefi_binaries_url // ""' "$GITHUB_EVENT_PATH")
           if [ -n "$trust_cache_url" ]; then echo "::add-mask::$trust_cache_url"; fi
           if [ -n "$data_seed_url" ]; then echo "::add-mask::$data_seed_url"; fi
+          if [ -n "$uefi_binaries_url" ]; then echo "::add-mask::$uefi_binaries_url"; fi
           fail() { echo "::error::$1"; exit 1; }
           [ -f device/board.toml ] || fail "the device repository has no board.toml"
           [ -f "device/configs/$DEFCONFIG" ] || fail "device/configs/$DEFCONFIG not found: $(cd device/configs 2>/dev/null && printf '%s ' *_defconfig)"
@@ -138,6 +158,8 @@ jobs:
           if [ "$SKIP_SETUP" = true ] && [ -z "$data_seed_url" ]; then fail "skip_setup needs data_seed_url"; fi
           if [ "$INIT_DATA" = true ] && [ -n "$data_seed_url" ]; then fail "init_data builds a new installation seed; a data_seed_url already supplies one"; fi
           if [ "$INIT_DATA" = true ] && [[ "$STEPS" != *payload* ]]; then fail "init_data only applies to the payload step"; fi
+          if [ "$BUILD_BOOTIMG" = true ] && [ "$BUILD_FIRMWARE" != true ]; then fail "build_bootimg needs build_firmware"; fi
+          if [ "$BUILD_BOOTIMG" = true ] && [[ "$STEPS" != *payload* ]]; then fail "build_bootimg needs the payload step"; fi
           if [ "$INIT_DATA" = true ] && ! [[ "$DATA_GIB" =~ ^[0-9]+$ ]] ; then fail "data_gib must be a whole number of GiB"; fi
           if [ "$INIT_DATA" = true ] && { [ "$DATA_GIB" -lt 3 ] || [ "$DATA_GIB" -gt 1024 ]; }; then fail "data_gib must be in 3..1024"; fi
           if [ "$OWNER_TRUST_CACHE" = true ] && [ -z "$trust_cache_url" ]; then fail "owner_trust_cache needs trust_cache_url"; fi
@@ -358,6 +380,48 @@ jobs:
           if [ -f "$RUNNER_TEMP/data.dbr" ]; then args+=(--data-ramdisk "$RUNNER_TEMP/data.dbr"); fi
           if [ "$SKIP_SETUP" = true ]; then args+=(--skip-setup); fi
           ./unixnu build payload "${args[@]}"
+
+      - name: Check out Mu-Silicium
+        if: inputs.build_firmware
+        env:
+          UEFI_REF: ${{ inputs.uefi_ref }}
+        run: |
+          set -euo pipefail
+          uefi="$RUNNER_TEMP/uefi-uke"
+          ref="${UEFI_REF:-8a1153e6c54c508e613127af8c639334cdd8e51f}"
+          git clone -q https://github.com/Allenwdk/uefi-uke.git "$uefi"
+          git -C "$uefi" fetch -q --depth 1 origin "$ref"
+          git -C "$uefi" checkout -q "$ref"
+          # Mu_Basecore is the board's EDK II tree; firmware.py applies the board patches to it.
+          git -C "$uefi" submodule update --init --depth 1 Mu_Basecore
+          echo "UNIXNU_UEFI=$uefi" >> "$GITHUB_ENV"
+          echo "UNIXNU_EDK2=$uefi/Mu_Basecore" >> "$GITHUB_ENV"
+
+      - name: Install the uke vendor binaries
+        if: inputs.build_firmware && inputs.uefi_binaries_url != ''
+        env:
+          VENDOR_TARBALL: ${{ inputs.uefi_binaries_url }}
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 "$VENDOR_TARBALL" -o "$RUNNER_TEMP/uefi-binaries.tar.gz"
+          mkdir -p "$UNIXNU_UEFI/Binaries"
+          tar -xzf "$RUNNER_TEMP/uefi-binaries.tar.gz" -C "$UNIXNU_UEFI/Binaries"
+          test -f "$UNIXNU_UEFI/Binaries/uke/QcomPkg/Drivers/EnvDxe/EnvDxe.inf"
+          echo "vendor binaries: $(find "$UNIXNU_UEFI/Binaries/uke" -type f | wc -l) files"
+
+      - name: Build firmware
+        if: inputs.build_firmware
+        run: |
+          set -euo pipefail
+          if [ ! -d "$UNIXNU_UEFI/Binaries/uke" ]; then
+            echo "::error::this board needs Binaries/uke (54 vendor DXEs and RawFiles) from the device firmware; pass uefi_binaries_url"
+            exit 1
+          fi
+          ./unixnu build firmware --uefi "$UNIXNU_UEFI" --edk2 "$UNIXNU_EDK2"
+
+      - name: Build the boot image
+        if: inputs.build_bootimg
+        run: ./unixnu bootimg
 
       - name: Collect the text logs
         id: logs
