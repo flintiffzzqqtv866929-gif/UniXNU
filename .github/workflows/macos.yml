@@ -280,13 +280,14 @@ jobs:
           fi
           # Read each tool's output whole, then parse. Piping into head closes the pipe under pipefail and
           # the writer dies with a broken pipe (exit 120 before any work happened).
+          # unixnu logs '== ipsw: remote ...' before the info line, so match the version line anywhere.
           info=$(./unixnu ipsw info)
-          build=$(printf '%s\n' "$info" | sed -n '1s/.*(\([^)]*\)).*/\1/p')
-          [ -n "$build" ] || { echo "::error::cannot read the build from ipsw info"; exit 1; }
+          build=$(printf '%s\n' "$info" | sed -n 's/^[0-9][0-9.]* (\([0-9A-Za-z]*\)).*/\1/p' | sed -n '1p')
+          [ -n "$build" ] || { echo "::error::cannot read the build from ipsw info: ${info}"; exit 1; }
           # iPadOS 27 ships the OS image as an AEA archive: macOS /usr/bin/aea decrypts it with the key
           # the ipsw tool reads from the archive header.
           fetched=$(./unixnu ipsw fetch OS)
-          aea=$(printf '%s\n' "$fetched" | sed -n '$p')
+          aea=$(printf '%s\n' "$fetched" | sed -n 's/^\(.*\.aea\)$/\1/p' | sed -n '$p')
           echo "OS member: ${aea}"
           [ -f "$aea" ] || { echo "::error::ipsw fetch OS produced no image: ${fetched}"; exit 1; }
           command -v ipsw >/dev/null || brew install blacktop/tap/ipsw
