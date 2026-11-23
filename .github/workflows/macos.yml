@@ -220,11 +220,27 @@ jobs:
           # prepare-xnu-source.py lists Apple sources through the GitHub API; anonymous calls from hosted runners hit
           # the shared rate limit (HTTP 403).
           GITHUB_TOKEN: ${{ github.token }}
-        # Prelink adds the original kernelcache kexts. The 24A446 layout leaves no room for this
-        # DEVELOPMENT native image's code after the retained kexts, and the matched Apple
-        # RELEASE/LTO reference that qualifies the full pipeline is not in this tree, so the
-        # kernel step stages the native executable (mode native-only) until both are restored.
-        run: ./unixnu build kernel
+        # Prelink matches the source calls against a symbol-bearing build of the same source, so the
+        # kernel is built first without it: that build leaves .cache/xnu-work and the source archives
+        # the reference needs. The next two steps build the reference and prelink once it exists.
+        run: ./unixnu build kernel --skip-prelink
+
+      - name: Build the fileset reference
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        # The reference is the board's RELEASE build of the same patched tree (no LTO: its link would
+        # need the macOS linker). The profile names it as build/xnu/fileset-reference/mach.release...
+        run: |
+          tree="$(ls -d out/*/*/*/tree | head -1)"
+          echo "reference tree: ${tree}"
+          UNIXNU_XNU_ARCH=arm64e UNIXNU_IOS_VERSION=27.0 \
+            python3 "${tree}/scripts/build-fileset-reference-27.py"
+
+      - name: Prelink
+        id: prelink
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./unixnu prelink
 
       - name: Build userdata
         id: userdata
