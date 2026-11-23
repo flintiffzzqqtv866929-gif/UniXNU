@@ -224,7 +224,7 @@ jobs:
         # DEVELOPMENT native image's code after the retained kexts, and the matched Apple
         # RELEASE/LTO reference that qualifies the full pipeline is not in this tree, so the
         # kernel step stages the native executable (mode native-only) until both are restored.
-        run: ./unixnu build kernel --skip-prelink
+        run: ./unixnu build kernel
 
       - name: Build userdata
         id: userdata
