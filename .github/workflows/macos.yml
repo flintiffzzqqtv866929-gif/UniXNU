@@ -72,6 +72,10 @@ on:
         description: Pack the boot image from the firmware volume and the built payload
         type: boolean
         default: false
+      minimal_firmware:
+        description: Build with UKE_VENDOR_HW=0 and a placeholder SecParti.cfg (no vendor DXEs in the FV)
+        type: boolean
+        default: false
       uefi_ref:
         description: uefi-uke ref (empty uses the recorded commit)
         required: false
@@ -140,6 +144,7 @@ jobs:
           DATA_GIB: ${{ inputs.data_gib }}
           BUILD_FIRMWARE: ${{ inputs.build_firmware }}
           BUILD_BOOTIMG: ${{ inputs.build_bootimg }}
+          MINIMAL_FIRMWARE: ${{ inputs.minimal_firmware }}
         run: |
           # The URLs can carry access tokens and the logs of a public repository are public: read them from the
           # event payload, never from step environments, and mask them before any later step prints its env.
@@ -160,6 +165,7 @@ jobs:
           if [ "$INIT_DATA" = true ] && [[ "$STEPS" != *payload* ]]; then fail "init_data only applies to the payload step"; fi
           if [ "$BUILD_BOOTIMG" = true ] && [ "$BUILD_FIRMWARE" != true ]; then fail "build_bootimg needs build_firmware"; fi
           if [ "$BUILD_BOOTIMG" = true ] && [[ "$STEPS" != *payload* ]]; then fail "build_bootimg needs the payload step"; fi
+          if [ "$MINIMAL_FIRMWARE" = true ] && [ "$BUILD_FIRMWARE" != true ]; then fail "minimal_firmware needs build_firmware"; fi
           if [ "$INIT_DATA" = true ] && ! [[ "$DATA_GIB" =~ ^[0-9]+$ ]] ; then fail "data_gib must be a whole number of GiB"; fi
           if [ "$INIT_DATA" = true ] && { [ "$DATA_GIB" -lt 3 ] || [ "$DATA_GIB" -gt 1024 ]; }; then fail "data_gib must be in 3..1024"; fi
           if [ "$OWNER_TRUST_CACHE" = true ] && [ -z "$trust_cache_url" ]; then fail "owner_trust_cache needs trust_cache_url"; fi
@@ -411,11 +417,23 @@ jobs:
 
       - name: Build firmware
         if: inputs.build_firmware
+        env:
+          MINIMAL_FIRMWARE: ${{ inputs.minimal_firmware }}
         run: |
           set -euo pipefail
           if [ ! -d "$UNIXNU_UEFI/Binaries/uke" ]; then
-            echo "::error::this board needs Binaries/uke (54 vendor DXEs and RawFiles) from the device firmware; pass uefi_binaries_url"
-            exit 1
+            if [ "$MINIMAL_FIRMWARE" != true ]; then
+              echo "::error::this board needs Binaries/uke from the device firmware; pass uefi_binaries_url or minimal_firmware"
+              exit 1
+            fi
+            # The uke DSC leaves UKE_VENDOR_HW at 0, so all 51 vendor DXEs stay out of the FV. The
+            # only unconditional Binaries/uke reference is this RAW section; its contents are read
+            # by vendor drivers that are not in this firmware volume, so a stand-in is enough to
+            # build and pack the image. Real vendor firmware needs the original file.
+            mkdir -p "$UNIXNU_UEFI/Binaries/uke/RawFiles"
+            printf '%s\n' '# Placeholder for a first EDK II build; vendor DXEs are disabled (UKE_VENDOR_HW=0).' \
+              > "$UNIXNU_UEFI/Binaries/uke/RawFiles/SecParti.cfg"
+            echo "::warning::minimal firmware: placeholder SecParti.cfg; no vendor DXEs in the firmware volume"
           fi
           ./unixnu build firmware --uefi "$UNIXNU_UEFI" --edk2 "$UNIXNU_EDK2"
 
