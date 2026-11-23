@@ -206,6 +206,12 @@ jobs:
           PRE_BUILD: ${{ inputs.pre_build }}
           DEVICE_DIR: ${{ github.workspace }}/device
           GITHUB_TOKEN: ${{ github.token }}
+          UKE_GPU_FW_1: ${{ secrets.UKE_GPU_FW_1 }}
+          UKE_GPU_FW_2: ${{ secrets.UKE_GPU_FW_2 }}
+          UKE_GPU_FW_3: ${{ secrets.UKE_GPU_FW_3 }}
+          UKE_GPU_FW_4: ${{ secrets.UKE_GPU_FW_4 }}
+          UKE_GPU_FW_5: ${{ secrets.UKE_GPU_FW_5 }}
+          UKE_GPU_FW_6: ${{ secrets.UKE_GPU_FW_6 }}
         run: bash -euo pipefail -c "$PRE_BUILD"
 
       - name: Build kernel
