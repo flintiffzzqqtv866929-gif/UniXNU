@@ -292,7 +292,10 @@ jobs:
           secrets = [os.environ.get('UNIXNU_UNIQUE_CHIP_ID', ''), inputs.get('trust_cache_url', ''), inputs.get('data_seed_url', '')]
           secrets = [value for value in secrets if value]
           count = 0
-          for path in sorted(source.glob('*.log')) if source.is_dir() else []:
+          # The fileset reference builds outside the work logs; keep its link log with the others.
+          reference = Path(os.environ['WORK']) / 'tree/build/xnu/fileset-reference'
+          extra = list(reference.glob('*.log')) if reference.is_dir() else []
+          for path in sorted((list(source.glob('*.log')) if source.is_dir() else []) + extra):
               data = path.read_bytes()
               if b'\0' in data:
                   continue
@@ -300,7 +303,8 @@ jobs:
               for value in secrets:
                   text = text.replace(value, '***')
               text = re.sub(r'https?://[^\s"\']*[?&](?:token|sig|signature|key|X-Amz-Signature)=[^\s"\']*', '***', text, flags=re.I)
-              (target / path.name).write_text(text)
+              name = path.name if path.parent == source else f'fileset-reference-{path.name}'
+              (target / name).write_text(text)
               count += 1
           print(f'{count} text logs staged')
           PY
