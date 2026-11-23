@@ -306,6 +306,8 @@ jobs:
           fi
           # packed_ramdisk ships in the DarwinBoot submodule, the same one the payload step reads.
           git submodule update --init --depth 1 drivers/DarwinBoot
+          # seed-data-grow.py keeps its scratch image under build/, which a kernel-only tree may not have.
+          mkdir -p build
           mount="$RUNNER_TEMP/os"
           mkdir -p "$mount"
           hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$RUNNER_TEMP/os.dmg" >/dev/null
