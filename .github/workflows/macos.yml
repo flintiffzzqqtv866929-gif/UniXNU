@@ -435,6 +435,9 @@ jobs:
               > "$UNIXNU_UEFI/Binaries/uke/RawFiles/SecParti.cfg"
             echo "::warning::minimal firmware: placeholder SecParti.cfg; no vendor DXEs in the firmware volume"
           fi
+          # Xcode's clang and Homebrew's lld are different releases (21 vs 23), which CLANGPDB rejects.
+          # Let the driver validate one matching toolchain directory instead of mixing them.
+          export CLANG_BIN="$(brew --prefix llvm)/bin"
           ./unixnu build firmware --uefi "$UNIXNU_UEFI" --edk2 "$UNIXNU_EDK2"
 
       - name: Build the boot image
