@@ -263,6 +263,25 @@ jobs:
           ./unixnu build userdata
           df -h "$GITHUB_WORKSPACE"
 
+      - name: Build TianoCompress
+        if: contains(inputs.steps, 'payload')
+        # compression = "uefi" needs the EDK II BaseTools utility, which the macOS image does not carry.
+        # A sparse checkout keeps this to BaseTools plus the MdePkg headers TianoCompress includes; the
+        # top-level make also wants the brotli submodule, so build just Common and TianoCompress.
+        run: |
+          set -euo pipefail
+          if command -v TianoCompress >/dev/null; then
+            echo "TianoCompress already on PATH"
+            exit 0
+          fi
+          edk2="$RUNNER_TEMP/edk2-basetools"
+          git clone -q --depth 1 --filter=blob:none --sparse https://github.com/tianocore/edk2.git "$edk2"
+          git -C "$edk2" sparse-checkout set BaseTools/Source/C MdePkg/Include
+          make -C "$edk2/BaseTools/Source/C/Common" -j4
+          make -C "$edk2/BaseTools/Source/C/TianoCompress" -j4
+          "$edk2/BaseTools/Source/C/bin/TianoCompress" --help >/dev/null
+          echo "$edk2/BaseTools/Source/C/bin" >> "$GITHUB_PATH"
+
       - name: Create the first-install Data seed
         if: contains(inputs.steps, 'payload') && inputs.init_data && inputs.data_seed_url == ''
         env:
