@@ -292,9 +292,18 @@ jobs:
           [ -f "$aea" ] || { echo "::error::ipsw fetch OS produced no image: ${fetched}"; exit 1; }
           command -v ipsw >/dev/null || brew install blacktop/tap/ipsw
           keys=$(ipsw fw aea --key "$aea" || true)
-          key=$(printf '%s\n' "$keys" | sed -n 's/^base64: //p' | sed -n '1p')
+          # The tool prints the key as one 'base64:<payload>' line, with and without a space depending on
+          # its version, and the core helper hands that whole line to aea. Try the line as printed, then
+          # the bare payload.
+          key=$(printf '%s\n' "$keys" | sed -n '/^base64:/p' | sed -n '1p')
           [ -n "$key" ] || { echo "::error::${aea}: no AEA key: ${keys}"; exit 1; }
-          /usr/bin/aea decrypt -i "$aea" -o "$RUNNER_TEMP/os.dmg" -key-value "$key"
+          if ! /usr/bin/aea decrypt -i "$aea" -o "$RUNNER_TEMP/os.dmg" -key-value "$key"; then
+            echo "aea refused the key line; retrying with the bare value"
+            rm -f "$RUNNER_TEMP/os.dmg"
+            bare=${key#base64:}
+            bare=${bare# }
+            /usr/bin/aea decrypt -i "$aea" -o "$RUNNER_TEMP/os.dmg" -key-value "$bare"
+          fi
           # packed_ramdisk ships in the DarwinBoot submodule, the same one the payload step reads.
           git submodule update --init --depth 1 drivers/DarwinBoot
           mount="$RUNNER_TEMP/os"
