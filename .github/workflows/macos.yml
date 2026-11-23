@@ -56,6 +56,14 @@ on:
         description: Mark Setup as done in the Data seed
         type: boolean
         default: false
+      init_data:
+        description: Create the first-install Data seed from the IPSW OS image (macOS; downloads the OS image)
+        type: boolean
+        default: false
+      data_gib:
+        description: Size of that first-install Data volume in GiB (3..1024)
+        required: false
+        default: "3"
 
 permissions:
   contents: read
@@ -112,6 +120,8 @@ jobs:
           OWNER_TRUST_CACHE: ${{ inputs.owner_trust_cache }}
           GROW_GIB: ${{ inputs.grow_gib }}
           SKIP_SETUP: ${{ inputs.skip_setup }}
+          INIT_DATA: ${{ inputs.init_data }}
+          DATA_GIB: ${{ inputs.data_gib }}
         run: |
           # The URLs can carry access tokens and the logs of a public repository are public: read them from the
           # event payload, never from step environments, and mask them before any later step prints its env.
@@ -126,6 +136,10 @@ jobs:
           if [ -n "$GROW_GIB" ] && ! [[ "$GROW_GIB" =~ ^[0-9]+$ ]]; then fail "grow_gib must be a whole number of GiB"; fi
           if [ -n "$GROW_GIB" ] && [ -z "$data_seed_url" ]; then fail "grow_gib needs data_seed_url"; fi
           if [ "$SKIP_SETUP" = true ] && [ -z "$data_seed_url" ]; then fail "skip_setup needs data_seed_url"; fi
+          if [ "$INIT_DATA" = true ] && [ -n "$data_seed_url" ]; then fail "init_data builds a new installation seed; a data_seed_url already supplies one"; fi
+          if [ "$INIT_DATA" = true ] && [[ "$STEPS" != *payload* ]]; then fail "init_data only applies to the payload step"; fi
+          if [ "$INIT_DATA" = true ] && ! [[ "$DATA_GIB" =~ ^[0-9]+$ ]] ; then fail "data_gib must be a whole number of GiB"; fi
+          if [ "$INIT_DATA" = true ] && { [ "$DATA_GIB" -lt 3 ] || [ "$DATA_GIB" -gt 1024 ]; }; then fail "data_gib must be in 3..1024"; fi
           if [ "$OWNER_TRUST_CACHE" = true ] && [ -z "$trust_cache_url" ]; then fail "owner_trust_cache needs trust_cache_url"; fi
           if [[ "$STEPS" != *payload* ]] && { [ -n "$trust_cache_url" ] || [ -n "$data_seed_url" ] || [ "$SKIP_SETUP" = true ]; }; then
             fail "trust_cache_url, data_seed_url and skip_setup only apply to the payload step"
@@ -247,6 +261,45 @@ jobs:
         if: contains(inputs.steps, 'userdata')
         run: |
           ./unixnu build userdata
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Create the first-install Data seed
+        if: contains(inputs.steps, 'payload') && inputs.init_data && inputs.data_seed_url == ''
+        env:
+          DATA_GIB: ${{ inputs.data_gib }}
+        # No repository carries a Data seed: it is installation state (APFS UUIDs and transaction
+        # metadata), so the same image has to be reused, never rebuilt at random. Without a preserved
+        # one, make-data-seed.py builds a first-install volume from the target OS image: it copies that
+        # volume's private/var skeleton into a fresh APFS Data volume, grows it and packs it, and the
+        # payload embeds the packed file as Payloads/scratch-data.img.
+        run: |
+          set -euo pipefail
+          if [ -f "$RUNNER_TEMP/data.dbr" ]; then
+            echo "a Data seed is already prepared"
+            exit 0
+          fi
+          build=$(./unixnu ipsw info | head -n 1 | sed -n 's/.*(\([^)]*\)).*/\1/p')
+          [ -n "$build" ] || { echo "::error::cannot read the build from ipsw info"; exit 1; }
+          # iPadOS 27 ships the OS image as an AEA archive: macOS /usr/bin/aea decrypts it with the key
+          # the ipsw tool reads from the archive header.
+          aea=$(./unixnu ipsw fetch OS | tail -n 1)
+          echo "OS member: ${aea}"
+          command -v ipsw >/dev/null || brew install blacktop/tap/ipsw
+          key=$(ipsw fw aea --key "$aea" | sed -n 's/^base64: //p' | head -n 1)
+          [ -n "$key" ] || { echo "::error::${aea}: no AEA key"; exit 1; }
+          /usr/bin/aea decrypt -i "$aea" -o "$RUNNER_TEMP/os.dmg" -key-value "$key"
+          # packed_ramdisk ships in the DarwinBoot submodule, the same one the payload step reads.
+          git submodule update --init --depth 1 drivers/DarwinBoot
+          mount="$RUNNER_TEMP/os"
+          mkdir -p "$mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$RUNNER_TEMP/os.dmg" >/dev/null
+          trap 'hdiutil detach "$mount" >/dev/null 2>&1 || true' EXIT
+          # Only root writes the owners and modes of a first-install Data volume.
+          sudo python3 scripts/make-data-seed.py "$mount" "$RUNNER_TEMP/data.dbr" --gib "$DATA_GIB" --build "$build"
+          hdiutil detach "$mount" >/dev/null
+          trap - EXIT
+          rm -f "$RUNNER_TEMP/os.dmg"
+          ls -l "$RUNNER_TEMP/data.dbr"
           df -h "$GITHUB_WORKSPACE"
 
       - name: Build payload
