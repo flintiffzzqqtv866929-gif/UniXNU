@@ -507,56 +507,15 @@ jobs:
           stock_vendor_boot_url=$(jq -r '.inputs.stock_vendor_boot_url // ""' "$GITHUB_EVENT_PATH")
           stock_dtb_sha256=$(jq -r '.inputs.stock_dtb_sha256 // ""' "$GITHUB_EVENT_PATH")
           stock_vendor_boot_sha256=$(jq -r '.inputs.stock_vendor_boot_sha256 // ""' "$GITHUB_EVENT_PATH")
-          # A private release asset is not served at its browser URL: github.com/<owner>/<repo>/releases/
-          # download/<tag>/<file> answers 404 to a token, and only the API endpoint with
-          # Accept: application/octet-stream returns the bytes. Resolve the tag and name to the asset id
-          # first, so the documented browser link can be passed as the input.
-          resolve() {
-            case "$1" in
-              https://github.com/*/releases/download/*) ;;
-              *) printf '%s' "$1"; return 0 ;;
-            esac
-            rest="${1#https://github.com/}"
-            owner="${rest%%/*}"; rest="${rest#*/}"
-            repo="${rest%%/*}"; rest="${rest#*/releases/download/}"
-            tag="${rest%%/*}"; name="${rest#*/}"
-            id=$(curl -fsSL -H "Authorization: Bearer $ASSETS_TOKEN" \
-              "https://api.github.com/repos/$owner/$repo/releases/tags/$tag" \
-              | jq -r --arg n "$name" '(.assets // [])[] | select(.name == $n) | .id' | head -1)
-            if [ -z "$id" ]; then
-              echo "::error::no asset named $name in $owner/$repo release $tag" >&2
-              return 1
-            fi
-            printf 'https://api.github.com/repos/%s/%s/releases/assets/%s' "$owner" "$repo" "$id"
-          }
-          download() {
-            url=$(resolve "$1") || return 1
-            case "$url" in
-              https://github.com/*|https://api.github.com/*)
-                # Fail loudly rather than 404 on the anonymous path.
-                curl -fsSL --retry 3 --retry-delay 5 \
-                  -H "Authorization: Bearer ${ASSETS_TOKEN:?set the ASSETS_TOKEN secret for private stock inputs}" \
-                  -H "Accept: application/octet-stream" -o "$2" "$url" ;;
-              *) curl -fsSL --retry 3 --retry-delay 5 -o "$2" "$url" ;;
-            esac
-          }
-          download "$stock_dtb_url" "$RUNNER_TEMP/stock.dtb"
-          download "$stock_vendor_boot_url" "$RUNNER_TEMP/stock-vendor-boot.img"
-          python3 - "$stock_dtb_sha256" "$stock_vendor_boot_sha256" <<'PY'
-          import hashlib
+          # A private release asset is not served at its browser URL; the script resolves the link to
+          # the API asset endpoint, applies the token and checks the digest (see its header).
+          bash scripts/fetch-stock-input.sh "$stock_dtb_url" "$RUNNER_TEMP/stock.dtb" "$stock_dtb_sha256"
+          bash scripts/fetch-stock-input.sh "$stock_vendor_boot_url" "$RUNNER_TEMP/stock-vendor-boot.img" "$stock_vendor_boot_sha256"
+          python3 - <<'PY'
           import os
           import struct
           import sys
-          want = {'stock.dtb': sys.argv[1], 'stock-vendor-boot.img': sys.argv[2]}
           root = os.environ['RUNNER_TEMP']
-          for name, expected in want.items():
-              data = open(os.path.join(root, name), 'rb').read()
-              got = hashlib.sha256(data).hexdigest()
-              print(f'{name}: {len(data)} bytes sha256={got}')
-              if expected and got != expected.strip().lower():
-                  sys.exit(f'::error::{name} sha256 {got} does not match the expected {expected}')
-              if not expected:
-                  print(f'::warning::no expected sha256 for {name}; the integrity check was skipped')
           if open(os.path.join(root, 'stock.dtb'), 'rb').read(4) != bytes.fromhex('d00dfeed'):
               sys.exit('::error::stock.dtb is not a flattened device tree')
           vendor = open(os.path.join(root, 'stock-vendor-boot.img'), 'rb').read()
