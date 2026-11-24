@@ -400,6 +400,10 @@ jobs:
           git -C "$uefi" checkout -q "$ref"
           # Mu_Basecore is the board's EDK II tree; firmware.py applies the board patches to it.
           git -C "$uefi" submodule update --init --depth 1 Mu_Basecore
+          # Mu_Basecore has nested submodules (brotli, libfdt, mipisyst, libspdm) that
+          # BaseTools' make needs. Initializing only the top-level submodule leaves
+          # BrotliCompress.c without ./brotli/c/common/constants.h.
+          git -C "$uefi/Mu_Basecore" submodule update --init --depth 1 --recursive
           echo "UNIXNU_UEFI=$uefi" >> "$GITHUB_ENV"
           echo "UNIXNU_EDK2=$uefi/Mu_Basecore" >> "$GITHUB_ENV"
 
