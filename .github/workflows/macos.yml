@@ -316,12 +316,18 @@ jobs:
         # --allow-missing lets an incomplete pairing through and binds the remaining sites to
         # _unixnu_fileset_unmapped; the kernel then panics only when an original component actually
         # calls one. The report records every such site as owner -> target, so print it here instead
-        # of leaving the device screen as the only evidence.
+        # of leaving the device screen as the only evidence. Also locate the unmapped stub inside
+        # the native kernel so a device panic PC can be matched to a symbol without a local image.
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import bisect
           import glob
           import json
+          from pathlib import Path
+          # PC observed on the uke panic screen; set PANIC_PC in a rerun to resolve another one.
+          import os
+          panic_pc = int(os.environ.get('PANIC_PC', '0xfffffff00ac1538'), 16)
           paths = sorted(glob.glob('out/*/*/*/kernel/kernel.json'))
           if not paths:
               print('no kernel.json found')
@@ -338,6 +344,21 @@ jobs:
                   print(f'  {sum(targets.values()):5d}  {owner}  {sample}')
               if len(rows) > 30:
                   print(f'  ... {len(rows) - 30} more owners')
+              # The pairing maps original addresses to native functions and their symbols.
+              pairing_path = Path(path).with_name('kernel.map.json')
+              if not pairing_path.is_file():
+                  continue
+              pairing = json.load(open(pairing_path))
+              native = sorted((int(value['native'], 16), value.get('name') or '', key)
+                              for key, value in (pairing.get('functions') or {}).items())
+              if not native:
+                  continue
+              addresses = [item[0] for item in native]
+              index = bisect.bisect_right(addresses, panic_pc) - 1
+              print(f'panic PC {panic_pc:#x}:')
+              for value, name, original in native[max(0, index - 2):index + 3]:
+                  mark = ' <- nearest' if value == addresses[index] else ''
+                  print(f'  {value:#x}  {name or "(unnamed)"}  original {original}{mark}')
           PY
 
       - name: Build userdata
