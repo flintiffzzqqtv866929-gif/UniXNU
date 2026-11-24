@@ -435,9 +435,28 @@ jobs:
               > "$UNIXNU_UEFI/Binaries/uke/RawFiles/SecParti.cfg"
             echo "::warning::minimal firmware: placeholder SecParti.cfg; no vendor DXEs in the firmware volume"
           fi
-          # Xcode's clang and Homebrew's lld are different releases (21 vs 23), which CLANGPDB rejects.
-          # Let the driver validate one matching toolchain directory instead of mixing them.
-          export CLANG_BIN="$(brew --prefix llvm)/bin"
+          # Xcode's clang is release 21; Homebrew's LLVM and LLD are 23. CLANGPDB requires one
+          # directory with matching clang, lld-link, llvm-lib and llvm-rc. Homebrew splits LLVM
+          # and LLD into separate kegs, so link the four tools into a single prefix here.
+          toolchain="$RUNNER_TEMP/clang-bin"
+          mkdir -p "$toolchain"
+          for name in clang clang++ llvm-lib llvm-rc lld-link; do
+            src=""
+            for prefix in "$(brew --prefix llvm)" "$(brew --prefix lld)"; do
+              if [ -x "$prefix/bin/$name" ]; then
+                src="$prefix/bin/$name"
+                break
+              fi
+            done
+            if [ -z "$src" ]; then
+              echo "::error::$name not found in Homebrew LLVM or LLD"
+              exit 1
+            fi
+            ln -sf "$src" "$toolchain/$name"
+          done
+          printf 'clang: '; "$toolchain/clang" --version | head -n 1
+          printf 'lld-link: '; "$toolchain/lld-link" --version | head -n 1
+          export CLANG_BIN="$toolchain/"
           ./unixnu build firmware --uefi "$UNIXNU_UEFI" --edk2 "$UNIXNU_EDK2"
 
       - name: Build the boot image
