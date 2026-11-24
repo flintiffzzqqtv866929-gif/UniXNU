@@ -457,7 +457,14 @@ jobs:
           printf 'clang: '; "$toolchain/clang" --version | head -n 1
           printf 'lld-link: '; "$toolchain/lld-link" --version | head -n 1
           export CLANG_BIN="$toolchain/"
-          ./unixnu build firmware --uefi "$UNIXNU_UEFI" --edk2 "$UNIXNU_EDK2"
+          firmware_args=(--uefi "$UNIXNU_UEFI" --edk2 "$UNIXNU_EDK2")
+          if [ "$MINIMAL_FIRMWARE" = true ]; then
+            # The board preflight compares the memory map against the stock vendor DTB.
+            # A minimal build excludes the vendor DXEs and does not stage that DTB,
+            # so the vendor-DTB check cannot run here.
+            firmware_args+=(--skip-preflight)
+          fi
+          ./unixnu build firmware "${firmware_args[@]}"
 
       - name: Build the boot image
         if: inputs.build_bootimg
