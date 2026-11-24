@@ -84,8 +84,24 @@ on:
         description: URL of a tar.gz containing Binaries/uke from the board's vendor firmware (masked in logs)
         required: false
         default: ""
+      stock_dtb_url:
+        description: URL of the stock device tree (masked in logs; required by build_bootimg)
+        required: false
+        default: ""
+      stock_dtb_sha256:
+        description: Expected sha256 of stock_dtb_url (empty skips the check)
+        required: false
+        default: ""
+      stock_vendor_boot_url:
+        description: URL of the stock vendor_boot image (masked in logs; required by build_bootimg)
+        required: false
+        default: ""
+      stock_vendor_boot_sha256:
+        description: Expected sha256 of stock_vendor_boot_url (empty skips the check)
+        required: false
+        default: ""
       upload_boot:
-        description: Upload the built boot image as a short-lived artifact (contains Apple-derived payload)
+        description: Upload the built boot and vendor_boot images as a short-lived artifact (contains Apple-derived payload)
         type: boolean
         default: false
 
@@ -158,6 +174,10 @@ jobs:
           if [ -n "$trust_cache_url" ]; then echo "::add-mask::$trust_cache_url"; fi
           if [ -n "$data_seed_url" ]; then echo "::add-mask::$data_seed_url"; fi
           if [ -n "$uefi_binaries_url" ]; then echo "::add-mask::$uefi_binaries_url"; fi
+          stock_dtb_url=$(jq -r '.inputs.stock_dtb_url // ""' "$GITHUB_EVENT_PATH")
+          stock_vendor_boot_url=$(jq -r '.inputs.stock_vendor_boot_url // ""' "$GITHUB_EVENT_PATH")
+          if [ -n "$stock_dtb_url" ]; then echo "::add-mask::$stock_dtb_url"; fi
+          if [ -n "$stock_vendor_boot_url" ]; then echo "::add-mask::$stock_vendor_boot_url"; fi
           fail() { echo "::error::$1"; exit 1; }
           [ -f device/board.toml ] || fail "the device repository has no board.toml"
           [ -f "device/configs/$DEFCONFIG" ] || fail "device/configs/$DEFCONFIG not found: $(cd device/configs 2>/dev/null && printf '%s ' *_defconfig)"
@@ -169,6 +189,9 @@ jobs:
           if [ "$INIT_DATA" = true ] && [[ "$STEPS" != *payload* ]]; then fail "init_data only applies to the payload step"; fi
           if [ "$BUILD_BOOTIMG" = true ] && [ "$BUILD_FIRMWARE" != true ]; then fail "build_bootimg needs build_firmware"; fi
           if [ "$BUILD_BOOTIMG" = true ] && [[ "$STEPS" != *payload* ]]; then fail "build_bootimg needs the payload step"; fi
+          if [ "$BUILD_BOOTIMG" = true ] && { [ -z "$stock_dtb_url" ] || [ -z "$stock_vendor_boot_url" ]; }; then
+            fail "build_bootimg needs stock_dtb_url and stock_vendor_boot_url: uke's ABL rejects a ramdisk in boot, so the payload goes into vendor_boot and the image needs the stock device tree"
+          fi
           if [ "$MINIMAL_FIRMWARE" = true ] && [ "$BUILD_FIRMWARE" != true ]; then fail "minimal_firmware needs build_firmware"; fi
           if [ "$INIT_DATA" = true ] && ! [[ "$DATA_GIB" =~ ^[0-9]+$ ]] ; then fail "data_gib must be a whole number of GiB"; fi
           if [ "$INIT_DATA" = true ] && { [ "$DATA_GIB" -lt 3 ] || [ "$DATA_GIB" -gt 1024 ]; }; then fail "data_gib must be in 3..1024"; fi
@@ -474,21 +497,81 @@ jobs:
           fi
           ./unixnu build firmware "${firmware_args[@]}"
 
+      - name: Fetch the stock boot inputs
+        if: inputs.build_bootimg
+        env:
+          ASSETS_TOKEN: ${{ secrets.ASSETS_TOKEN }}
+        run: |
+          set -euo pipefail
+          stock_dtb_url=$(jq -r '.inputs.stock_dtb_url // ""' "$GITHUB_EVENT_PATH")
+          stock_vendor_boot_url=$(jq -r '.inputs.stock_vendor_boot_url // ""' "$GITHUB_EVENT_PATH")
+          stock_dtb_sha256=$(jq -r '.inputs.stock_dtb_sha256 // ""' "$GITHUB_EVENT_PATH")
+          stock_vendor_boot_sha256=$(jq -r '.inputs.stock_vendor_boot_sha256 // ""' "$GITHUB_EVENT_PATH")
+          # A private release asset rejects an anonymous request, so send the token when one is configured.
+          # (run: bash here is macOS's 3.2, which rejects a local array declaration, so keep these plain.)
+          curl_opts=(-fsSL --retry 3 --retry-delay 5)
+          if [ -n "${ASSETS_TOKEN:-}" ]; then curl_opts+=(-H "Authorization: Bearer $ASSETS_TOKEN"); fi
+          curl "${curl_opts[@]}" -o "$RUNNER_TEMP/stock.dtb" "$stock_dtb_url"
+          curl "${curl_opts[@]}" -o "$RUNNER_TEMP/stock-vendor-boot.img" "$stock_vendor_boot_url"
+          python3 - "$stock_dtb_sha256" "$stock_vendor_boot_sha256" <<'PY'
+          import hashlib
+          import os
+          import struct
+          import sys
+          want = {'stock.dtb': sys.argv[1], 'stock-vendor-boot.img': sys.argv[2]}
+          root = os.environ['RUNNER_TEMP']
+          for name, expected in want.items():
+              data = open(os.path.join(root, name), 'rb').read()
+              got = hashlib.sha256(data).hexdigest()
+              print(f'{name}: {len(data)} bytes sha256={got}')
+              if expected and got != expected.strip().lower():
+                  sys.exit(f'::error::{name} sha256 {got} does not match the expected {expected}')
+              if not expected:
+                  print(f'::warning::no expected sha256 for {name}; the integrity check was skipped')
+          if open(os.path.join(root, 'stock.dtb'), 'rb').read(4) != bytes.fromhex('d00dfeed'):
+              sys.exit('::error::stock.dtb is not a flattened device tree')
+          vendor = open(os.path.join(root, 'stock-vendor-boot.img'), 'rb').read()
+          if vendor[:8] != b'VNDRBOOT':
+              sys.exit('::error::stock-vendor-boot.img is not a vendor_boot image')
+          version = struct.unpack_from('<I', vendor, 8)[0]
+          if version != 4:
+              sys.exit(f'::error::vendor_boot v{version} has no ramdisk table; only v4 works here')
+          print(f'stock vendor_boot: v4, {len(vendor)} bytes, stock ramdisk {struct.unpack_from("<I", vendor, 24)[0]} bytes')
+          PY
+
       - name: Build the boot image
         if: inputs.build_bootimg
         run: |
           set -euo pipefail
-          tree="$(ls -d out/*/*/*/tree | head -1)"
-          dtb="${tree%/tree}/device-tree/hardware.dtb"
-          test -f "$dtb"
-          # The generated tree has no /reserved-memory parent; bootimg adds
-          # /reserved-memory/splash_region and fdtput needs the parent first.
-          if ! fdtget -l "$dtb" /reserved-memory >/dev/null 2>&1; then
-            fdtput -c "$dtb" /reserved-memory
-          fi
-          # uke's ABL rejects a ramdisk in boot: ramdisk_size must stay 0, so the
-          # payload goes into vendor_boot's vendor ramdisk instead.
-          ./unixnu bootimg --dtb "$dtb" --ramdisk none
+          # uke's ABL rejects a ramdisk in boot (ramdisk_size has to stay 0) and reads the payload from
+          # vendor_boot's vendor ramdisk, so this image is the firmware volume plus a device tree only.
+          # The tree has to be the stock one: the board's own dts is a skeleton and does not describe the
+          # SoC. unixnu adds the board.toml [[bootimg.dtb_node]] entries (splash_region and /chosen).
+          ./unixnu bootimg --dtb "$RUNNER_TEMP/stock.dtb" --ramdisk none
+
+      - name: Pack the vendor_boot image
+        if: inputs.build_bootimg
+        run: |
+          set -euo pipefail
+          payload="$(ls -d out/*/*/*/payload | head -1)"
+          # compression = "uefi" moves the FAT volume through payload.uefi, which is the copy that fits the
+          # 96 MiB partition; without compression the transport is the FAT volume itself.
+          transport="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('transport_path') or sys.argv[2])" \
+            "$payload/payload.json" "$payload/payload.img")"
+          test -f "$transport"
+          boot="$(ls -d out/*/*/*/boot | head -1)"
+          # --verify-against rebuilds the stock ramdisk first: anything but a byte-identical image means the
+          # layout assumptions do not hold for this vendor_boot, so refuse to write a ramdisk into it.
+          ./unixnu vendor_boot --stock "$RUNNER_TEMP/stock-vendor-boot.img" \
+            --ramdisk "$transport" --verify-against -o "$boot/vendor_boot.img"
+          python3 - "$boot/vendor_boot.img" <<'PY'
+          import os
+          import sys
+          size = os.path.getsize(sys.argv[1])
+          print(f'vendor_boot.img: {size} bytes')
+          if size > 100663296:
+              sys.exit(f'::error::vendor_boot.img is {size} bytes and does not fit the 96 MiB partition')
+          PY
 
       - name: Upload boot image
         if: inputs.build_bootimg && inputs.upload_boot
@@ -497,6 +580,7 @@ jobs:
           name: uke-boot-${{ github.run_id }}
           path: |
             out/*/*/*/boot/boot.img
+            out/*/*/*/boot/vendor_boot.img
             out/*/*/*/payload/payload.uefi
             out/*/*/*/payload/payload.img
             out/*/*/*/payload/payload.json
