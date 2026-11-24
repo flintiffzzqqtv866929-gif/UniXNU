@@ -1,0 +1,69 @@
+name: stock inputs check
+
+# Smoke test for the private release assets the boot image needs: one minute on a Linux runner instead
+# of a full kernel build, and the annotation says whether the failure is auth, the release, or the file.
+on:
+  workflow_dispatch:
+    inputs:
+      stock_dtb_url:
+        description: Stock device tree (browser release link or direct URL)
+        required: true
+      stock_vendor_boot_url:
+        description: Stock vendor_boot image (browser release link or direct URL)
+        required: true
+      stock_dtb_sha256:
+        description: Expected sha256 of the device tree (empty skips the check)
+        required: false
+        default: ""
+      stock_vendor_boot_sha256:
+        description: Expected sha256 of vendor_boot (empty skips the check)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Linux keeps the queue short; the script itself is expected to run on the macOS runner too.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ASSETS_TOKEN: ${{ secrets.ASSETS_TOKEN }}
+    steps:
+      - name: Check out UniXNU
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch and verify
+        env:
+          DTB_URL: ${{ inputs.stock_dtb_url }}
+          VENDOR_BOOT_URL: ${{ inputs.stock_vendor_boot_url }}
+          DTB_SHA256: ${{ inputs.stock_dtb_sha256 }}
+          VENDOR_BOOT_SHA256: ${{ inputs.stock_vendor_boot_sha256 }}
+        run: |
+          set -euo pipefail
+          # The URLs can carry tokens and the logs of a public repository are public.
+          tmp="$RUNNER_TEMP/stock"
+          mkdir -p "$tmp"
+          bash scripts/fetch-stock-input.sh "$DTB_URL" "$tmp/stock.dtb" "$DTB_SHA256"
+          bash scripts/fetch-stock-input.sh "$VENDOR_BOOT_URL" "$tmp/stock-vendor-boot.img" "$VENDOR_BOOT_SHA256"
+          python3 - "$tmp" <<'PY'
+          import os
+          import struct
+          import sys
+          root = sys.argv[1]
+          dtb = open(os.path.join(root, 'stock.dtb'), 'rb').read()
+          if dtb[:4] != bytes.fromhex('d00dfeed'):
+              sys.exit('::error::stock.dtb is not a flattened device tree')
+          vendor = open(os.path.join(root, 'stock-vendor-boot.img'), 'rb').read()
+          if vendor[:8] != b'VNDRBOOT':
+              sys.exit('::error::stock-vendor-boot.img is not a vendor_boot image')
+          version = struct.unpack_from('<I', vendor, 8)[0]
+          if version != 4:
+              sys.exit(f'::error::vendor_boot v{version} has no ramdisk table; only v4 works here')
+          print(f'device tree: {len(dtb)} bytes')
+          print(f'vendor_boot: v4, {len(vendor)} bytes, stock ramdisk {struct.unpack_from("<I", vendor, 24)[0]} bytes')
+          print('PASS: both stock inputs are readable and well formed')
+          PY
