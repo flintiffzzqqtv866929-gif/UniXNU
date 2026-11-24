@@ -472,7 +472,12 @@ jobs:
 
       - name: Build the boot image
         if: inputs.build_bootimg
-        run: ./unixnu bootimg
+        run: |
+          set -euo pipefail
+          tree="$(ls -d out/*/*/*/tree | head -1)"
+          dtb="${tree%/tree}/device-tree/hardware.dtb"
+          test -f "$dtb"
+          ./unixnu bootimg --dtb "$dtb"
 
       - name: Collect the text logs
         id: logs
