@@ -507,12 +507,41 @@ jobs:
           stock_vendor_boot_url=$(jq -r '.inputs.stock_vendor_boot_url // ""' "$GITHUB_EVENT_PATH")
           stock_dtb_sha256=$(jq -r '.inputs.stock_dtb_sha256 // ""' "$GITHUB_EVENT_PATH")
           stock_vendor_boot_sha256=$(jq -r '.inputs.stock_vendor_boot_sha256 // ""' "$GITHUB_EVENT_PATH")
-          # A private release asset rejects an anonymous request, so send the token when one is configured.
-          # (run: bash here is macOS's 3.2, which rejects a local array declaration, so keep these plain.)
-          curl_opts=(-fsSL --retry 3 --retry-delay 5)
-          if [ -n "${ASSETS_TOKEN:-}" ]; then curl_opts+=(-H "Authorization: Bearer $ASSETS_TOKEN"); fi
-          curl "${curl_opts[@]}" -o "$RUNNER_TEMP/stock.dtb" "$stock_dtb_url"
-          curl "${curl_opts[@]}" -o "$RUNNER_TEMP/stock-vendor-boot.img" "$stock_vendor_boot_url"
+          # A private release asset is not served at its browser URL: github.com/<owner>/<repo>/releases/
+          # download/<tag>/<file> answers 404 to a token, and only the API endpoint with
+          # Accept: application/octet-stream returns the bytes. Resolve the tag and name to the asset id
+          # first, so the documented browser link can be passed as the input.
+          resolve() {
+            case "$1" in
+              https://github.com/*/releases/download/*) ;;
+              *) printf '%s' "$1"; return 0 ;;
+            esac
+            rest="${1#https://github.com/}"
+            owner="${rest%%/*}"; rest="${rest#*/}"
+            repo="${rest%%/*}"; rest="${rest#*/releases/download/}"
+            tag="${rest%%/*}"; name="${rest#*/}"
+            id=$(curl -fsSL -H "Authorization: Bearer $ASSETS_TOKEN" \
+              "https://api.github.com/repos/$owner/$repo/releases/tags/$tag" \
+              | jq -r --arg n "$name" '(.assets // [])[] | select(.name == $n) | .id' | head -1)
+            if [ -z "$id" ]; then
+              echo "::error::no asset named $name in $owner/$repo release $tag" >&2
+              return 1
+            fi
+            printf 'https://api.github.com/repos/%s/%s/releases/assets/%s' "$owner" "$repo" "$id"
+          }
+          download() {
+            url=$(resolve "$1") || return 1
+            case "$url" in
+              https://github.com/*|https://api.github.com/*)
+                # Fail loudly rather than 404 on the anonymous path.
+                curl -fsSL --retry 3 --retry-delay 5 \
+                  -H "Authorization: Bearer ${ASSETS_TOKEN:?set the ASSETS_TOKEN secret for private stock inputs}" \
+                  -H "Accept: application/octet-stream" -o "$2" "$url" ;;
+              *) curl -fsSL --retry 3 --retry-delay 5 -o "$2" "$url" ;;
+            esac
+          }
+          download "$stock_dtb_url" "$RUNNER_TEMP/stock.dtb"
+          download "$stock_vendor_boot_url" "$RUNNER_TEMP/stock-vendor-boot.img"
           python3 - "$stock_dtb_sha256" "$stock_vendor_boot_sha256" <<'PY'
           import hashlib
           import os
