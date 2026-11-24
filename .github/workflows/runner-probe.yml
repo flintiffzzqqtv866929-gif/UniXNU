@@ -1,0 +1,36 @@
+name: runner probe
+
+# The macOS build has been cancelled three times in a row without a single step
+# running: the job never gets a runner and GitHub cancels it 15 minutes after it
+# was queued. This probe runs both candidate labels side by side and exits in
+# seconds, so "the label is short on capacity" can be told apart from "the
+# account cannot get macOS runners at all".
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        label: [macos-15, macos-26]
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 15
+    steps:
+      - name: Report the runner
+        run: |
+          echo "requested label: ${{ matrix.label }}"
+          echo "host arch: $(uname -m)"
+          sw_vers
+          xcodebuild -version || true
+          clang --version | head -2 || true
+          echo "cpu: $(sysctl -n hw.ncpu)"
