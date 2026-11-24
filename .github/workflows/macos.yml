@@ -486,14 +486,20 @@ jobs:
           if ! fdtget -l "$dtb" /reserved-memory >/dev/null 2>&1; then
             fdtput -c "$dtb" /reserved-memory
           fi
-          ./unixnu bootimg --dtb "$dtb"
+          # uke's ABL rejects a ramdisk in boot: ramdisk_size must stay 0, so the
+          # payload goes into vendor_boot's vendor ramdisk instead.
+          ./unixnu bootimg --dtb "$dtb" --ramdisk none
 
       - name: Upload boot image
         if: inputs.build_bootimg && inputs.upload_boot
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: uke-boot-${{ github.run_id }}
-          path: out/*/*/*/boot/boot.img
+          path: |
+            out/*/*/*/boot/boot.img
+            out/*/*/*/payload/payload.uefi
+            out/*/*/*/payload/payload.img
+            out/*/*/*/payload/payload.json
           retention-days: 1
           if-no-files-found: error
 
