@@ -84,6 +84,10 @@ on:
         description: URL of a tar.gz containing Binaries/uke from the board's vendor firmware (masked in logs)
         required: false
         default: ""
+      upload_boot:
+        description: Upload the built boot image as a short-lived artifact (contains Apple-derived payload)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -483,6 +487,15 @@ jobs:
             fdtput -c "$dtb" /reserved-memory
           fi
           ./unixnu bootimg --dtb "$dtb"
+
+      - name: Upload boot image
+        if: inputs.build_bootimg && inputs.upload_boot
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: uke-boot-${{ github.run_id }}
+          path: out/*/*/*/boot/boot.img
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Collect the text logs
         id: logs
